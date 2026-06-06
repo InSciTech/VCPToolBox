@@ -8,7 +8,7 @@
   "pluginType": "synchronous",
   "entryPoint": {
     "type": "executable",
-    "command": "CodeSearcher.exe"
+    "command": "./CodeSearcher-linux-arm64"
   },
   "communication": {
     "protocol": "stdio",
