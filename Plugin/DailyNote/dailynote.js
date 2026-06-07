@@ -24,6 +24,7 @@ const CONFIGURED_EXTENSION = (process.env.DAILY_NOTE_EXTENSION || "txt").toLower
 
 // Fuzzy Diff for Update Failures
 const FUZZY_DIFF_ENABLED = (process.env.DAILY_NOTE_FUZZY_DIFF || "false").toLowerCase() === "true";
+const UPDATE_FAILURE_HINT = "请检查字段或标点符号是否与原文一致；若多次失败，可尝试使用 DailyNoteManager 插件 list 对应文件夹/日期，以检索日记原文状态后再重试。";
 
 // 忽略的文件夹列表
 const IGNORED_FOLDERS = ['MusicDiary'];
@@ -364,7 +365,14 @@ async function handleCreateCommand(args) {
         const fileContent = `[${datePart}] - ${actualMaidName}\n${processedContent}`;
         await fs.writeFile(filePath, fileContent);
         debugLog(`Successfully wrote file (length: ${fileContent.length})`);
-        return { status: "success", message: `Diary saved to ${filePath}` };
+        return {
+            status: "success",
+            result: {
+                message: `${actualMaidName} 的日记已保存到 ${sanitizedFolderName} 文件夹 (${finalFileName})`,
+                folder: sanitizedFolderName,
+                fileName: finalFileName
+            }
+        };
     } catch (error) {
         console.error("[DailyNote] Error during 'create' command:", error.message);
         return { status: "error", error: error.message || "An unknown error occurred during diary creation." };
@@ -934,9 +942,17 @@ async function handleUpdateCommand(args) {
         }
 
         if (modificationDone) {
+            const finalFileName = path.basename(modifiedFilePath);
+            const folderName = path.basename(path.dirname(modifiedFilePath));
             return {
                 status: 'success',
-                result: `Successfully edited diary file: ${modifiedFilePath}`,
+                result: {
+                    result: `Successfully edited diary file: ${modifiedFilePath}`,
+                    message: `${maid || 'AI'} 已成功更新 ${folderName} 文件夹中的日记文件 (${finalFileName})`,
+                    targetFile: modifiedFilePath,
+                    folder: folderName,
+                    fileName: finalFileName
+                }
             };
         } else {
             const scopeDescription = folder
@@ -944,9 +960,10 @@ async function handleUpdateCommand(args) {
                 : maid
                     ? `maid '${maid}'`
                     : '';
-            const errorMessage = scopeDescription
+            const baseErrorMessage = scopeDescription
                 ? `Target content not found in any diary files for ${scopeDescription}.`
                 : 'Target content not found in any diary files.';
+            const errorMessage = `${baseErrorMessage} ${UPDATE_FAILURE_HINT}`;
 
             // Layer 3: Emergency Fallback
             if (FUZZY_DIFF_ENABLED && !bestCandidate) {
@@ -1034,7 +1051,32 @@ async function main() {
             const args = JSON.parse(inputData);
             const { command, ...parameters } = args;
 
-            switch (command) {
+            // 鲁棒性兼容：AI 有时会遗漏 command，或把 command 拼错。
+            // 参数形态足够明确时，优先按参数形态纠正：
+            // - 含 target + replace 时，视为 update
+            // - 含 content/contentText/Content 时，视为 create
+            // 显式且正确的 command 保持原样；显式但未知的 command 允许被参数形态覆盖。
+            const rawCommand = typeof command === 'string' ? command.trim().toLowerCase() : command;
+            const hasCreateContent =
+                typeof parameters.contentText === 'string' ||
+                typeof parameters.Content === 'string' ||
+                typeof parameters.content === 'string';
+            const hasUpdateTargetReplace =
+                typeof parameters.target === 'string' &&
+                typeof parameters.replace === 'string';
+
+            let normalizedCommand = rawCommand;
+            if (rawCommand !== 'create' && rawCommand !== 'update') {
+                if (hasUpdateTargetReplace) {
+                    normalizedCommand = 'update';
+                    debugLog(`Command '${command || ''}' is missing or invalid; inferred 'update' from target/replace arguments.`);
+                } else if (hasCreateContent) {
+                    normalizedCommand = 'create';
+                    debugLog(`Command '${command || ''}' is missing or invalid; inferred 'create' from content arguments.`);
+                }
+            }
+
+            switch (normalizedCommand) {
                 case 'create':
                     result = await handleCreateCommand(parameters);
                     break;
@@ -1042,7 +1084,7 @@ async function main() {
                     result = await handleUpdateCommand(parameters);
                     break;
                 default:
-                    result = { status: "error", error: `Unknown command: '${command}'. Use 'create' or 'update'.` };
+                    result = { status: "error", error: `Unknown command: '${normalizedCommand}'. Use 'create' or 'update'.` };
             }
         } catch (error) {
             console.error("[DailyNote] Error processing request:", error.message);

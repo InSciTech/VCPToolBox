@@ -402,9 +402,72 @@ VCP 内置了 **语义任务智能模型路由器（Semantic Model Router）**�
 
 详细设计见 [`docs/SEMANTIC_MODEL_ROUTER.md`](docs/SEMANTIC_MODEL_ROUTER.md)。
 
+### 3.11 OneRing：任意前端 / 分布式连续性人格实验系统
+
+VCP 正在引入一个全新的实验性人格连续性系统：**OneRing**。这是 VCP 对“任意前端、任意分布式节点、同一个 Agent 灵魂连续存在”这一终极概念的 0.1 版本工程验证。
+
+传统 AI 前端通常把一次聊天窗口视为一个独立世界：Web 端、移动端、桌面端、Agent 通讯中心、群聊、分布式子节点之间的上下文彼此割裂。OneRing 的目标是让同一个 Agent 不再被某个前端窗口绑定，而是拥有一条可跨前端、跨设备、跨分布式入口延续的短期时间线。
+
+**核心能力：**
+
+- **统一时间线记录**：通过 [`Plugin/OneRing/OneRing.js`](Plugin/OneRing/OneRing.js) 作为消息预处理器，将不同前端的 user / assistant 消息记录到 Agent 级 SQLite 时间线中。
+- **跨前端上下文补齐**：当用户从一个前端切换到另一个前端时，OneRing 会按时间戳和去重规则补入最近相关上下文，让 Agent 能“接上刚才的话”。
+- **任意客户端身份标记**：通过系统提示词触发语法 `[[OneRing::AgentName::Frontend]]` 标记当前 Agent 与客户端来源，例如 `[[OneRing::Nova::VCPChat]]`、`[[OneRing::Nova::Mobile]]`。
+- **系统尾标透明追踪**：每条参与 OneRing 时间线的消息会追加系统生成的 `[OneRing通知:...于...发送于...]` 尾标，用于跨端排序、去重和来源追踪，不需要 AI 自己输出。
+- **记录与补充解耦**：可通过 `ONERING_RECORD_ONLY` 在“只记录 / 不改写上下文”和“允许上下文补齐”之间切换，便于安全灰度。
+- **轻量数据库上限**：每个 Agent 默认只保留最近 100 条 OneRing 消息，实际注入上下文仍由 `ONERING_MAX_CONTEXT_BLOCKS` 控制，避免无限增长与上下文污染。
+
+```text
+┌────────────── OneRing：多前端人格连续性实验 ──────────────┐
+│                                                          │
+│   VCPChat ──┐                                            │
+│   Mobile ───┼──→ OneRing 时间线 ──→ 同一个 Agent 人格     │
+│   WebUI  ───┤          │                                 │
+│   AA总线 ───┘          ├─ 最近上下文补齐                  │
+│                        ├─ 跨端来源追踪                    │
+│                        ├─ 时间戳排序与去重                │
+│                        └─ Agent 级短期连续记忆            │
+│                                                          │
+│   目标：不是“同步聊天记录”，而是让 Agent 在任意入口保持连续存在感。 │
+└──────────────────────────────────────────────────────────┘
+```
+
+**实验定位：**
+
+OneRing 不是长期记忆系统，也不替代 TagMemo / DailyNote / RAG。它更像 Agent 的“短期海马体”与“跨端工作记忆桥”：负责保存最近交互的时间连续性，让 Agent 在不同客户端之间保持人格、语境和对话节奏的一致。
+
+这意味着用户可以在 VCPChat 里聊到一半，切到手机、WebUI、AgentAssistant 通讯中心或未来的任意分布式入口时，同一个 Agent 仍能基于最近时间线理解“刚才发生了什么”。这是 VCP 从“多端可访问 AI”走向“多端连续存在 AI”的关键实验。
+
 ---
 
 ## 4. 记忆与认知系统
+
+### 4.0 冷热拆分：记忆与知识的双通道数据库
+
+VCP 的长期认知系统现在完成了底层数据库职责拆分：**热记忆**与**冷知识**分离运行，由不同的索引与检索策略承载，最终在工具层与上下文注入层统一服务 Agent。
+
+```text
+热记忆层：dailynote/  → KnowledgeBaseManager.js → TagMemo / 浪潮联想 / 元思考 / Agent 内心记忆
+冷知识层：knowledge/  → TDBKnowledge.js         → TriviumDB / 文档资料馆 / 百科手册 / 私有知识
+检索路由：LightMemo   → 按查询意图分流到热记忆或冷知识，并可复用精排能力
+```
+
+**热记忆（Memory）** 面向 Agent 的生活、互动、经验、反思、任务过程与人际关系。它使用 [`KnowledgeBaseManager.js`](KnowledgeBaseManager.js) 与 TagMemo 浪潮算法维护高关联、可联想、可反思的记忆网络，强调“为什么会想起”“这段记忆和当前人格/上下文有什么关系”。
+
+**冷知识（Knowledge）** 面向百科、技术手册、项目文档、论文、私有资料与大规模静态文档。它使用 [`TDBKnowledge.js`](TDBKnowledge.js) 在 [`knowledge/`](knowledge/) 下按一级目录构建独立 TriviumDB 知识库，强调事实召回、来源溯源、百万级 chunk 承载能力与低噪声检索。
+
+这种拆分让 VCP 的 RAG 不再把“个人记忆”和“外部知识”混在同一套重型联想系统中：
+
+| 维度 | 热记忆 | 冷知识 |
+|------|--------|--------|
+| 数据目录 | [`dailynote/`](dailynote/) | [`knowledge/`](knowledge/) |
+| 管理器 | [`KnowledgeBaseManager.js`](KnowledgeBaseManager.js) | [`TDBKnowledge.js`](TDBKnowledge.js) |
+| 数据性质 | 日记、经验、反思、关系、任务过程 | 文档、百科、手册、论文、私有资料 |
+| 检索目标 | 直觉联想、长期人格连续性、元思考增强 | 精确事实召回、文档片段溯源、大规模知识问答 |
+| 算法侧重 | TagMemo、共现势能、EPA、测地线重排 | TriviumDB 混合检索、向量 × BM25 × 图关系 |
+| 前端管理 | 管理面板“日记管理” | 管理面板“知识库管理” |
+
+调用层也已经适配冷知识库检索：[`Plugin/LightMemo/LightMemo.js`](Plugin/LightMemo/LightMemo.js) 支持通过 `[知识库]` / `[知识库:库名]` 语法把查询分流到冷知识库；[`Plugin/DailyNoteSearcher/`](Plugin/DailyNoteSearcher/) 的 Rust 搜索器也可通过 `root_path=knowledge` 直接检索冷知识库文件。完整开发文档见 [`docs/TDB_COLD_KNOWLEDGE_BASE.md`](docs/TDB_COLD_KNOWLEDGE_BASE.md)。
 
 ### 4.1 核心交互范式：定制化“记忆灵魂” RAG 模型
 
@@ -973,28 +1036,52 @@ pm2 start adminServer.js --name vcp-admin
 
 服务器将监听在 `config.env` 中配置的端口，管理面板自动监听该端口 + 1。
 
-#### 使用 Docker Compose 运行（推荐）
+#### 使用 Docker 官方镜像部署（推荐）
 
-**前提条件**：安装 Docker 和 Docker Compose
+VCP 官方 Docker 镜像已发布至 Docker Hub，支持 `linux/amd64` 和 `linux/arm64` 双架构。
 
-**配置**：确保 `config.env` 文件已正确配置
-
-**构建并启动服务**：
+**拉取镜像**：
 
 ```bash
+docker pull lioensky/vcptoolbox:latest
+```
+
+**使用 Docker Compose 一键部署**：
+
+1. 克隆项目获取配置文件：
+   ```bash
+   git clone https://github.com/lioensky/VCPToolBox.git
+   cd VCPToolBox
+   cp config.env.example config.env
+   # 编辑 config.env，填入必要的 API 密钥
+   ```
+
+2. 启动服务：
+   ```bash
+   docker-compose up -d
+   ```
+
+3. 查看日志：
+   ```bash
+   docker-compose logs -f
+   ```
+
+4. 停止服务：
+   ```bash
+   docker-compose down
+   ```
+
+> **说明**：`docker-compose.yml` 默认使用官方镜像 `lioensky/vcptoolbox:latest`，无需本地构建。如需本地构建，可在 `docker-compose.yml` 中取消 `build: .` 的注释并注释掉 `image` 行。
+
+**Docker Hub 地址**：[hub.docker.com/r/lioensky/vcptoolbox](https://hub.docker.com/r/lioensky/vcptoolbox)
+
+#### 使用源码本地构建 Docker 镜像（可选）
+
+如果你需要自定义构建或无法访问 Docker Hub：
+
+```bash
+# 在 docker-compose.yml 中将 image 行注释，取消 build 行注释后：
 docker-compose up --build -d
-```
-
-**查看日志**：
-
-```bash
-docker-compose logs -f
-```
-
-**停止服务**：
-
-```bash
-docker-compose down
 ```
 
 ### 7.2 部署 VCP 分布式节点
@@ -1545,6 +1632,21 @@ VCP 的征程远未结束，我们对未来充满期待：
 - Google Gemini 系列
 - 开源模型（通过 vLLM、Ollama 等部署）
 - 任何支持 SSE 流式输出的 API 服务
+
+### Q: 如何让使用非 OpenAI 格式的客户端（如 Codex CLI、Claude Code、Gemini SDK）连接 VCP？
+
+**A:** VCP 内置了**协议桥接路由**（`routes/protocolBridge.js`），在主服务器端口上同时暴露以下兼容端点：
+
+| 协议 | 端点 | 说明 |
+|------|------|------|
+| OpenAI Responses API | `POST /v1/responses` | 支持 `input` 数组格式，兼容 Codex CLI 等工具 |
+| Anthropic Messages API | `POST /v1/messages` | 支持 `system` + `messages` 格式，兼容 Claude Code 等工具 |
+| Gemini GenerateContent | `POST /v1beta/models/:model:generateContent` | 支持 `contents` + `systemInstruction` 格式 |
+| Gemini StreamGenerateContent | `POST /v1beta/models/:model:streamGenerateContent` | Gemini 流式端点 |
+
+**工作原理**：这些端点会将各协议格式的请求自动转换为标准的 `messages` 数组，然后内部转发到 VCP 的 `/v1/chat/completions` 处理链路。这意味着所有 VCP 能力（插件系统、RAG 记忆、角色分割、语义模型路由等）对所有协议的客户端**完全透明可用**。
+
+**使用方式**：将客户端的 API Base URL 指向 VCP 服务器地址（如 `http://your-server:5890`），使用 `config.env` 中的 `Key` 作为 Bearer Token 即可。响应会自动转换回对应协议的格式（包括流式 SSE）。
 
 ### Q: 如何确保 VCP 系统的安全性？
 

@@ -38,7 +38,8 @@ class StreamHandler {
       _refreshRagBlocksIfNeeded,
       fetchWithRetry,
       vcpToolUseForbidden,
-      semanticModelFallbackCandidates
+      semanticModelFallbackCandidates,
+      oneRingResponseMeta
     } = this.context;
 
     const shouldShowVCP = SHOW_VCP_OUTPUT || this.context.forceShowVCP;
@@ -50,6 +51,24 @@ class StreamHandler {
     let currentAIContentForLoop = '';
     let currentAIRawDataForDiary = '';
     let chatLogs = [];
+    let oneRingAssistantTurnParts = [];
+
+    const recordOneRingAIResponse = (aiText, phaseLabel) => {
+      const oneRingModule = pluginManager?.messagePreprocessors?.get?.('OneRing');
+      if (!oneRingModule) return;
+
+      const recordPromise = oneRingResponseMeta && typeof oneRingModule.recordAIResponseWithMeta === 'function'
+        ? oneRingModule.recordAIResponseWithMeta(oneRingResponseMeta, aiText)
+        : (typeof oneRingModule.recordAIResponseFromMessages === 'function'
+          ? oneRingModule.recordAIResponseFromMessages(originalBody.messages, aiText)
+          : null);
+
+      if (recordPromise && typeof recordPromise.catch === 'function') {
+        recordPromise.catch(e =>
+          console.error(`[OneRing Stream] Error recording AI response (${phaseLabel}):`, e),
+        );
+      }
+    };
 
     // 辅助函数：处理 AI 响应流 (优化版：直通转发 + 后台解析 + chunk 空闲超时保护)
     const processAIResponseStreamHelper = async (aiResponse, isInitialCall) => {
@@ -70,7 +89,9 @@ class StreamHandler {
             message.content += delta.content;
           }
           if (delta && delta.reasoning_content) {
-            collectedContentThisTurn += delta.reasoning_content;
+            // P0 安全修复：reasoning_content 只保留在日志 message.reasoning_content 中，
+            // 绝不混入 collectedContentThisTurn。该变量会进入 VCP 循环与 OneRing 入库，
+            // 一旦混入推理链会造成明文持久化与后续上下文污染。
             message.reasoning_content += delta.reasoning_content;
           }
         };
@@ -234,6 +255,9 @@ class StreamHandler {
     currentAIContentForLoop = initialAIResponseData.content;
     currentAIRawDataForDiary = initialAIResponseData.raw;
     if (writeChatLog) chatLogs.push({ request: originalBody, response: initialAIResponseData.message });
+    if (currentAIContentForLoop && currentAIContentForLoop.trim()) {
+      oneRingAssistantTurnParts.push(currentAIContentForLoop);
+    }
     handleDiaryFromAIResponse(currentAIRawDataForDiary).catch(e =>
       console.error('[VCP Stream Loop] Error in initial diary handling:', e),
     );
@@ -342,6 +366,9 @@ class StreamHandler {
         if (nextAiAPIResponse.ok) {
           let nextAIResponseData = await processAIResponseStreamHelper(nextAiAPIResponse, false);
           currentAIContentForLoop = nextAIResponseData.content;
+          if (currentAIContentForLoop && currentAIContentForLoop.trim()) {
+            oneRingAssistantTurnParts.push(currentAIContentForLoop);
+          }
           if (writeChatLog) {
             chatLogs.push({
               request: { messages: currentMessagesForLoop },
@@ -467,6 +494,9 @@ class StreamHandler {
 
       let nextAIResponseData = await processAIResponseStreamHelper(nextAiAPIResponse, false);
       currentAIContentForLoop = nextAIResponseData.content;
+      if (currentAIContentForLoop && currentAIContentForLoop.trim()) {
+        oneRingAssistantTurnParts.push(currentAIContentForLoop);
+      }
       if (writeChatLog) {
         chatLogs.push({
           request: { messages: currentMessagesForLoop },
@@ -484,6 +514,7 @@ class StreamHandler {
     } // toolcall loop end
 
     if (writeChatLog) writeChatLog(originalBody, chatLogs);
+    recordOneRingAIResponse(oneRingAssistantTurnParts.join('\n'), 'final_turn');
 
     if (recursionDepth >= maxRecursion && !res.writableEnded && !res.destroyed) {
       try {
